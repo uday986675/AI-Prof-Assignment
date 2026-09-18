@@ -256,13 +256,30 @@ class QuestionnaireService:
                 raise HTTPException(422, f"Answer to '{key}' is too long (max 2000 chars)")
             return text
         if kind == "boolean":
+            if key == "injury_history" and isinstance(value, str):
+                normalized = re.sub(r"[^a-z0-9']+", " ", value.lower()).strip()
+                negative_phrases = (
+                    "no injury", "not an injury", "wasn't an injury", "wasnt an injury",
+                    "was not an injury", "there was no injury", "didn't injure",
+                    "didnt injure", "didn't hurt", "didnt hurt", "no accident",
+                    "without injury",
+                )
+                if any(phrase in normalized for phrase in negative_phrases):
+                    value = "no"
+                elif re.search(r"\b(no|nope|never)\b", normalized):
+                    value = "no"
+                elif any(term in normalized for term in ("injury", "injured", "hurt", "fell", "accident")):
+                    value = "yes"
+
             if isinstance(value, bool):
+                if key == "injury_history":
+                    return "yes" if value else "no"
                 return value
             lowered = str(value).strip().lower()
             if lowered in ("yes", "true", "y", "1"):
-                return True
+                return "yes" if key == "injury_history" else True
             if lowered in ("no", "false", "n", "0"):
-                return False
+                return "no" if key == "injury_history" else False
             raise HTTPException(422, f"Answer to '{key}' must be yes or no")
         if kind == "single_choice":
             options = question.get("options") or []

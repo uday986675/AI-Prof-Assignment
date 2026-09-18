@@ -19,6 +19,7 @@ stays stateless, which is what makes restart-safe conversations possible.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -143,12 +144,18 @@ def _classify_node(state: GraphState) -> GraphState:
     if not update:
         update = _fallback_interpret(conv, message)
 
-    # A bare number while offers are on the table is a slot selection,
+    # A bare number or time matching an offer while offers are on the table is a slot selection,
     # whatever the interpreter thought (cheap, reliable disambiguation).
     if conv.offered and not update.get("slot_selected"):
         stripped = message.strip()
         if stripped.isdigit() and 1 <= int(stripped) <= len(conv.offered):
             update["slot_selected"] = conv.offered[int(stripped) - 1]["start_at"]
+        else:
+            for offer in conv.offered:
+                slot_time = offer["start_at"][11:16]
+                if slot_time in stripped:
+                    update["slot_selected"] = offer["start_at"]
+                    break
 
     question = conv.apply_utterance(update)
     described = _describe_update(update)
@@ -355,10 +362,47 @@ def _coerce_choice(question: dict, message: str):
                 return option
         return text  # invalid — service rejects with a clear message
     if kind == "boolean":
-        if lowered in ("yes", "y", "yeah", "yep", "true", "sure", "ok"):
-            return True
-        if lowered in ("no", "n", "nope", "false", "not really"):
+        if question.get("key") == "injury_history":
+            uncertain_phrases = (
+                "not sure", "unsure", "uncertain", "don't know", "dont know",
+                "do not know", "can't remember", "cant remember",
+            )
+            normalized = re.sub(r"[^a-z0-9']+", " ", lowered).strip()
+            if any(phrase in normalized for phrase in uncertain_phrases):
+                return None
+
+            negative_phrases = (
+                "no injury", "not an injury", "wasn't an injury", "wasnt an injury",
+                "was not an injury", "there was no injury", "didn't injure",
+                "didnt injure", "didn't hurt", "didnt hurt",
+                "didn't happen because of an injury", "didnt happen because of an injury",
+                "no accident", "without injury",
+            )
+            if any(phrase in normalized for phrase in negative_phrases):
+                return "no"
+            if re.search(r"\b(no|nope|never)\b", normalized):
+                return "no"
+
+            positive_phrases = (
+                "injury", "injured", "hurt", "fell", "accident", "started after",
+            )
+            if any(phrase in normalized for phrase in positive_phrases):
+                return "yes"
+            if re.search(r"\b(yes|yeah|yep|correct)\b", normalized):
+                return "yes"
+            return text
+
+        neg_phrases = ("no injury", "wasn't", "wasnt", "didn't", "didnt", "not an injury", "didn't hurt", "without injury")
+        neg_words = {"no", "n", "nope", "false", "never", "not"}
+        pos_phrases = ("after an injury", "injured", "fell", "hurt", "accident", "started after")
+        pos_words = {"yes", "y", "yeah", "yep", "true", "sure", "ok"}
+
+        words = set(lowered.translate(str.maketrans("", "", '.,!?\'"')).split())
+
+        if any(p in lowered for p in neg_phrases) or bool(words & neg_words):
             return False
+        if any(p in lowered for p in pos_phrases) or bool(words & pos_words):
+            return True
         return text
     if kind == "scale_1_10":
         if lowered.isdigit() and 1 <= int(lowered) <= 10:
@@ -392,6 +436,15 @@ def _questionnaire_turn(db, user, state: ConversationState, message: str):
     pending = capabilities.next_pending_questionnaire_for_assignment(db, user, assignment_id)
     question = (pending or {}).get("question") or {}
     value = _coerce_choice(question, message) if question else message.strip()
+
+    if question.get("key") == "injury_history" and value is None:
+        return (
+            "I want to make sure I record this correctly. Did the pain start "
+            "after an injury or accident? You can answer yes, no, injury, "
+            "accident, or describe what happened."
+        ), {
+            "next_action": "questionnaire", "questionnaire": conv.questionnaire,
+        }
 
     try:
         result = capabilities.answer_questionnaire(

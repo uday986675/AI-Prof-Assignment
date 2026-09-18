@@ -44,6 +44,7 @@ from backend.app.models import (  # noqa: E402
     User,
 )
 from backend.app.scheduling import SchedulingService, now_utc  # noqa: E402
+from backend.app.services import QuestionnaireService  # noqa: E402
 from datetime import datetime, time, timedelta  # noqa: E402
 
 platform_client = TestClient(platform_app)
@@ -51,7 +52,7 @@ platform_client = TestClient(platform_app)
 # Force the deterministic (no-LLM) interpreter path for every test: Phase 6
 # tests exercise questionnaire logic, not the LLM.
 import backend.app.agent.llm as agent_llm  # noqa: E402
-from backend.app.agent.graph import run_turn  # noqa: E402
+from backend.app.agent.graph import _coerce_choice, run_turn  # noqa: E402
 from backend.app.agent.state import ConversationState  # noqa: E402
 
 
@@ -160,7 +161,7 @@ class QFixture:
                 questions=[
                     {"key": "joint", "kind": "single_choice", "prompt": "Which joint?",
                      "options": ["Shoulder", "Knee", "Back"], "required": True},
-                    {"key": "injury", "kind": "boolean", "prompt": "Injury-related?", "required": False},
+                    {"key": "injury_history", "kind": "boolean", "prompt": "Did the pain start after an injury or accident?", "required": False},
                 ],
             )
             db.add_all([standard, specialty])
@@ -387,6 +388,10 @@ class TestCAnswers(unittest.TestCase):
         return (standard or rows)[0]
 
     def test_9_conversational_answers_accepted(self) -> None:
+        injury_question = {"key": "injury_history", "kind": "boolean", "required": True}
+        self.assertEqual(QuestionnaireService.validate_answer(injury_question, "injury"), "yes")
+        self.assertEqual(QuestionnaireService.validate_answer(injury_question, "accident"), "yes")
+
         # free text
         response = platform_client.post(
             f"/questionnaires/assignments/{self.assignment_id}/answers",
@@ -755,6 +760,42 @@ class TestGAgentCollection(unittest.TestCase):
             self.assertIn("Sorry", reply)
             self.assertIn("Which joint?", reply)  # re-asked with the options
             self.assertEqual(meta["next_action"], "questionnaire")
+        finally:
+            db.close()
+
+    def test_24_injury_history_normalizes_natural_language(self) -> None:
+        question = {"key": "injury_history", "kind": "boolean"}
+        expected = {
+            "injury": "yes",
+            "after an injury": "yes",
+            "I fell": "yes",
+            "yes": "yes",
+            "no injury": "no",
+        }
+        for answer, normalized in expected.items():
+            with self.subTest(answer=answer):
+                self.assertIs(_coerce_choice(question, answer), normalized)
+
+    def test_25_ambiguous_injury_history_reasks_without_advancing(self) -> None:
+        db, user, conv, _, _ = self._agent_book()
+        try:
+            conv.questionnaire["question_key"] = "injury_history"
+            original_state = dict(conv.questionnaire)
+            pending = {"question": {
+                "key": "injury_history",
+                "kind": "boolean",
+                "prompt": "Did the pain start after an injury or accident?",
+            }}
+            with mock.patch(
+                "backend.app.agent.graph.capabilities.next_pending_questionnaire_for_assignment",
+                return_value=pending,
+            ):
+                reply, meta = run_turn(db, user, conv, "I'm not sure")
+            self.assertIn("Did the pain start after an injury or accident?", reply)
+            self.assertIn("injury", reply)
+            self.assertIn("accident", reply)
+            self.assertEqual(meta["next_action"], "questionnaire")
+            self.assertEqual(conv.questionnaire, original_state)
         finally:
             db.close()
 
