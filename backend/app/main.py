@@ -4,20 +4,33 @@ Run:  uvicorn backend.app.main:app --reload --port 8000
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 
+import logging
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+logger = logging.getLogger("uvicorn.error")  # surfaces in uvicorn/Render logs
+
 from .database import base as database_base
+from .core.config import settings
 from .database.base import Base, engine, ensure_sqlite_dir
 from .scheduling import ConflictError, SchedulingError, ValidationError
 from . import models  # noqa: F401  (registers all tables)
 
 ensure_sqlite_dir()
 Base.metadata.create_all(bind=engine)
+
+# ── Temporary Render debug (remove after verifying) ──────────────
+print("GEMINI KEY LOADED:", bool(settings.gemini_api_key))
+print("GEMINI KEY LENGTH:", len(settings.gemini_api_key))
+print("GEMINI MODEL:", settings.gemini_model)
+# ─────────────────────────────────────────────────────────────────
 
 
 def _ensure_sqlite_columns() -> None:
@@ -54,11 +67,32 @@ def _ensure_sqlite_columns() -> None:
 
 _ensure_sqlite_columns()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup seeding for hosts without shell access (e.g. Render free tier).
+
+    Runs only when SEED_DEMO_ON_BOOT is enabled and only seeds the PLATFORM
+    database (never the Mock EHR). backend/scripts/seed_demo.py is idempotent
+    — every entity is an existence-checked upsert — so repeated boots, worker
+    restarts and even concurrent boots cannot create duplicates.
+    """
+    if settings.seed_demo_on_boot:
+        logger.info("SEED_DEMO_ON_BOOT enabled: seeding demo data (idempotent)")
+        from backend.scripts.seed_demo import main as seed_demo_main
+
+        seed_demo_main()
+        logger.info("Demo data seeding finished")
+    yield
+
+
 app = FastAPI(
     title="Healthcare AI Access Platform",
     version="0.1.0",
     description="Multi-tenant patient intake, scheduling and pre-visit AI agent (prototype)",
+    lifespan=lifespan,
 )
+
 
 app.add_middleware(
     CORSMiddleware,
