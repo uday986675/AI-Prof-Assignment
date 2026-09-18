@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+data/
+data/*.db
+data/*.db-journal
+*.sqlite3
+.pytest_cache/
+__pycache__/
+htmlcov/
+.coverage
+.streamlit/secrets.toml
+
+# Local virtual environment (Windows convention in this checkout)
+myenv/
+
+# SQLite WAL sidecars + probe leftovers
+data/*.db-shm
+data/*.db-wal
+*.db-journal
+
+# Local demo artifacts / logs
+speech.wav
+*.log
+p7_state.json
+
+# Freebuff local session state
+.freebuff/

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Healthcare AI Access Platform — Voice Demo (Phase 7)</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --line:#334155; --ink:#e2e8f0; --dim:#94a3b8;
+          --accent:#38bdf8; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:880px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.sub { color:var(--dim); margin:0 0 20px; font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input, button, select { font:inherit; }
+  input[type=email], input[type=password] { background:#0b1220; color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-width:220px; }
+  button { background:var(--accent); border:0; color:#06283d; font-weight:600;
+    border-radius:8px; padding:9px 14px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #recBtn.rec { background:var(--err); color:#fff; animation:pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity:.6; } }
+  #log { display:flex; flex-direction:column; gap:10px; margin-top:6px; }
+  .msg { padding:10px 12px; border-radius:10px; max-width:85%; white-space:pre-wrap; }
+  .user { align-self:flex-end; background:#164e63; }
+  .agent { align-self:flex-start; background:#312e81; }
+  .note { color:var(--dim); font-size:.8rem; }
+  .pill { font-size:.75rem; padding:2px 8px; border-radius:99px; border:1px solid var(--line); }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
+  audio { width:100%; margin-top:8px; }
+  .typebar { display:flex; gap:8px; margin-top:10px; }
+  .typebar input { flex:1; background:#0b1220; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:9px 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎙️ Voice Agent Demo — Phase 7</h1>
+  <p class="sub">Speak to the AI appointment assistant: speech → text → booking agent → speech (text always available as fallback).</p>
+
+  <div class="card">
+    <div class="row">
+      <input id="email" type="email" value="patient@demo.health" placeholder="patient email" />
+      <input id="password" type="password" value="Demo1234!" placeholder="password" />
+      <button id="loginBtn">Log in</button>
+      <span id="whoAmI" class="note"></span>
+    </div>
+    <p class="note" style="margin:8px 0 0">Demo accounts are created by <code>python -m backend.scripts.seed_demo</code>.</p>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="newBtn" disabled>＋ New conversation</button>
+      <span id="convId" class="pill"></span>
+      <span id="voiceStatus" class="pill">voice status: —</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="recBtn" disabled>🎤 Hold / tap to record</button>
+      <span id="recState" class="note"></span>
+    </div>
+    <div id="log"></div>
+    <div class="typebar">
+      <input id="typeIn" placeholder="…or type a message (text fallback is always available)" disabled />
+      <button id="typeBtn" class="ghost" disabled>Send</button>
+    </div>
+    <div id="ttsBox"></div>
+  </div>
+</main>
+
+<script>
+const API = location.origin === "null" ? "http://127.0.0.1:8000" : location.origin;
+const $ = (id) => document.getElementById(id);
+let token = null, convId = null;
+let recorder = null, chunks = [], recording = false;
+
+function note(el, text, cls) { const n = $(el); n.textContent = text || ""; n.className = cls || "note"; }
+function bubble(kind, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + kind;
+  div.textContent = text;
+  $("log").appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+async function api(path, opts = {}) {
+  const headers = opts.headers || {};
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(API + path, { ...opts, headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail + " (HTTP " + res.status + ")");
+  }
+  return res.json();
+}
+
+$("loginBtn").onclick = async () => {
+  try {
+    const data = await api("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("email").value.trim(), password: $("password").value }),
+    });
+    token = data.access_token;
+    $("newBtn").disabled = false;
+    note("whoAmI", "✓ logged in", "ok");
+    const st = await api("/agent/voice/status");
+    const tts = st.tts_available ? "TTS on (" + st.tts_model + ")" : "TTS off (text fallback)";
+    note("voiceStatus", "STT: " + st.stt_provider + " · " + tts, st.tts_available ? "ok" : "warn");
+    $("recBtn").disabled = false;
+  } catch (e) { note("whoAmI", e.message, "err"); }
+};
+
+$("newBtn").onclick = async () => {
+  try {
+    const s = await api("/agent/sessions", { method: "POST", body: "{}",
+      headers: { "Content-Type": "application/json" } });
+    convId = s.conversation_id;
+    $("convId").textContent = convId;
+    $("typeIn").disabled = false; $("typeBtn").disabled = false;
+    $("log").innerHTML = ""; $("ttsBox").innerHTML = "";
+    bubble("agent", "New conversation started. What do you need? (e.g. \"I need to see an orthopedic doctor for my shoulder pain sometime this week\")");
+  } catch (e) { bubble("agent", "Error: " + e.message); }
+};
+
+/* ---- recording (MediaRecorder → webm/opus; server STT accepts webm) ---- */
+$("recBtn").onclick = async () => {
+  if (recording) { recorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm" : "";
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    chunks = [];
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      recording = false;
+      $("recBtn").classList.remove("rec"); $("recBtn").textContent = "🎤 Hold / tap to record";
+      note("recState", "transcribing…");
+      const blob = new Blob(chunks, { type: mime || "audio/webm" });
+      const fd = new FormData();
+      fd.append("audio", blob, "speech." + (mime ? "webm" : "weba"));
+      fd.append("mime_type", mime || "audio/webm");
+      try {
+        const data = await api("/agent/sessions/" + convId + "/voice",
+          { method: "POST", body: fd });
+        note("recState", "");
+        bubble("user", "🎙️ " + data.transcript);
+        bubble("agent", data.reply);
+        renderTts(data);
+      } catch (e) {
+        note("recState", "");
+        bubble("agent", "Voice turn failed: " + e.message + " — you can type instead.");
+      }
+    };
+    recorder.start();
+    recording = true;
+    $("recBtn").classList.add("rec"); $("recBtn").textContent = "⏹ Stop recording";
+    note("recState", "listening…");
+  } catch (e) { note("recState", "microphone unavailable: " + e.message, "err"); }
+};
+
+function renderTts(data) {
+  $("ttsBox").innerHTML = "";
+  if (data.audio_base64) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = "data:" + (data.audio_mime_type || "audio/wav") + ";base64," + data.audio_base64;
+    audio.play().catch(() => {});   // autoplay may be blocked; controls remain
+    $("ttsBox").appendChild(audio);
+  }
+}
+
+/* ---- typed fallback (always available) ---- */
+async function sendText() {
+  const message = $("typeIn").value.trim();
+  if (!message || !convId) return;
+  $("typeIn").value = "";
+  bubble("user", message);
+  try {
+    const data = await api("/agent/sessions/" + convId + "/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+    bubble("agent", data.reply);
+  } catch (e) { bubble("agent", "Error: " + e.message); }
+}
+$("typeBtn").onclick = sendText;
+$("typeIn").addEventListener("keydown", (e) => { if (e.key === "Enter") sendText(); });
+</script>
+</body>
+</html>

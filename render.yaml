@@ -1,0 +1,73 @@
+# Render blueprint — deploys both services from this repository.
+#
+# The repo ships TWO independently-deployable ASGI apps:
+#   backend.app.main:app   → platform API (port 8000 locally)
+#   mock_ehr.app.main:app  → Mock EHR    (port 8001 locally)
+#
+# Render injects $PORT; both start commands bind to it. The Mock EHR's public
+# URL is handed to the backend via the MOCK_EHR_URL env var (fromService below)
+# so the connector talks to the deployed EHR instead of localhost.
+#
+# NOTE: this is a demo deployment on Render FREE instances — their ephemeral
+# disk means SQLite data does not survive redeploys/restarts. The seed script
+# restores demo data on boot. For persistent data, upgrade to a paid disk.
+
+services:
+  - type: web
+    name: ai-prof-ehr
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn mock_ehr.app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.10.11"
+      - key: MOCK_EHR_API_KEY
+        sync: false            # set manually in the Render dashboard (secret)
+      - key: MOCK_EHR_DATABASE_URL
+        value: sqlite:///./data/mock_ehr.db
+      - key: MOCK_EHR_FAULT_MODE
+        value: none
+      - key: ENVIRONMENT
+        value: production
+
+  - type: web
+    name: ai-prof-platform
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.10.11"
+      - key: DATABASE_URL
+        value: sqlite:///./data/platform.db
+      - key: MOCK_EHR_URL
+        fromService:
+          type: web
+          name: ai-prof-ehr
+          property: host      # https://ai-prof-ehr.onrender.com
+      - key: MOCK_EHR_API_KEY
+        sync: false            # must match the EHR service's key (secret)
+      - key: JWT_SECRET
+        sync: false            # set manually in the Render dashboard (secret)
+      - key: GEMINI_API_KEY
+        sync: false            # set manually in the Render dashboard (secret)
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: STT_PROVIDER
+        value: gemini
+      - key: STT_MODEL
+        value: gemini-2.5-flash
+      - key: TTS_MODEL
+        value: gemini-2.5-flash-preview-tts
+      - key: TTS_VOICE_NAME
+        value: Zephyr
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: MOCK_EHR_TIMEOUT_SECONDS
+        value: "10"
+      - key: APP_ENVIRONMENT
+        value: production
