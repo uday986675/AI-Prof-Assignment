@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    seed_demo_on_boot: bool = False
     # Database
     database_url: str = "sqlite:///./data/platform.db"
 
